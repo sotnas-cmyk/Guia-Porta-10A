@@ -9,6 +9,8 @@
 <link rel="icon" href="icon-192.png" sizes="192x192">
 <link rel="icon" href="icon-512.png" sizes="512x512">
 <meta name="theme-color" content="#007700">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
   :root {
     --bg: #eef4ea;
@@ -214,6 +216,15 @@
   .tag.uncertain { background: var(--accent-soft); color: var(--accent-ink); }
   .drawer-spec { margin: 1rem 0 0; font-size: 1rem; line-height: 1.5; }
   .drawer-addr, .drawer-notes { margin: 0.65rem 0 0; font-size: 0.87rem; line-height: 1.5; color: var(--ink-soft); }
+  .mini-map {
+    margin: 0.85rem 0 0; height: 11rem; border-radius: 10px; overflow: hidden;
+    background: var(--border); position: relative;
+  }
+  .mini-map .leaflet-container { background: var(--border); font-family: inherit; }
+  .mini-map-status {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 0.78rem; color: var(--ink-soft); text-align: center; padding: 0 1rem;
+  }
   .contact-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 0.5rem; }
   .contact-row a, .contact-row .disabled {
     display: flex; align-items: center; justify-content: center; gap: 0.4rem; height: 2.5rem; border-radius: 9px;
@@ -713,6 +724,56 @@
     });
   }
 
+  // ---- Geocodificação sob demanda (Nominatim / OpenStreetMap) ----
+  var GEO_KEY = "guia-porta-10a-geo-v1";
+  function loadGeoCache() {
+    try { return JSON.parse(localStorage.getItem(GEO_KEY) || "{}"); } catch (e) { return {}; }
+  }
+  function saveGeoCache(cache) {
+    try { localStorage.setItem(GEO_KEY, JSON.stringify(cache)); } catch (e) {}
+  }
+  var geoCache = loadGeoCache();
+  var miniMapInstance = null;
+
+  function geocode(r) {
+    var cached = geoCache[r.id];
+    if (cached) return Promise.resolve(cached);
+    var url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&q=" + encodeURIComponent(r.mapsQuery);
+    return fetch(url, { headers: { "Accept": "application/json" } })
+      .then(function (res) { if (!res.ok) throw new Error("geocode failed"); return res.json(); })
+      .then(function (data) {
+        if (!data || !data.length) throw new Error("sem resultado");
+        var coords = { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+        geoCache[r.id] = coords;
+        saveGeoCache(geoCache);
+        return coords;
+      });
+  }
+
+  function loadMiniMap(r) {
+    var container = document.getElementById("mini-map");
+    if (!container) return;
+    if (miniMapInstance) { miniMapInstance.remove(); miniMapInstance = null; }
+    if (typeof L === "undefined") {
+      container.innerHTML = '<div class="mini-map-status">Mapa indisponível offline.</div>';
+      return;
+    }
+    container.innerHTML = '<div class="mini-map-status">A localizar no mapa…</div>';
+    geocode(r).then(function (coords) {
+      if (state.selectedId !== r.id) return; // a gaveta já mudou entretanto
+      container.innerHTML = "";
+      miniMapInstance = L.map(container, { attributionControl: true, zoomControl: false }).setView([coords.lat, coords.lon], 15);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a>'
+      }).addTo(miniMapInstance);
+      L.marker([coords.lat, coords.lon]).addTo(miniMapInstance);
+    }).catch(function () {
+      if (state.selectedId !== r.id) return;
+      container.innerHTML = '<div class="mini-map-status">Não foi possível localizar no mapa. Usa os links de "Como chegar" abaixo.</div>';
+    });
+  }
+
   // ---- Drawer ----
   var overlay = document.getElementById("overlay");
   var drawer = document.getElementById("drawer");
@@ -728,6 +789,7 @@
     overlay.classList.remove("open");
     drawer.classList.remove("open");
     state.selectedId = null;
+    if (miniMapInstance) { miniMapInstance.remove(); miniMapInstance = null; }
   }
   overlay.addEventListener("click", closeDrawer);
 
@@ -749,7 +811,8 @@
       (r.especialidade ? '<p class="drawer-spec">' + esc(r.especialidade) + '</p>' : '') +
       (r.morada ? '<p class="drawer-addr">' + esc(r.morada) + '</p>' : '<p class="drawer-addr">Sem morada completa — o mapa pesquisa pelo nome e a terra.</p>') +
       (r.notas ? '<p class="drawer-notes">' + esc(r.notas) + '</p>' : '') +
-      '<p class="row-label" style="margin-top:1.1rem">Como chegar</p>' + mapsRowHtml(r) +
+      '<div class="mini-map" id="mini-map"><div class="mini-map-status">A localizar no mapa…</div></div>' +
+      '<p class="row-label" style="margin-top:0.85rem">Como chegar</p>' + mapsRowHtml(r) +
       '<div class="contact-row">' +
         (r.telefone ? '<a href="' + telHref(r.telefone) + '">' + ICON.phone + ' Ligar</a>' : '<span class="disabled">' + ICON.phone + ' Sem telefone</span>') +
         (r.website ? '<a href="' + websiteHref(r.website) + '" target="_blank" rel="noreferrer">' + ICON.globe + ' Site</a>' : '<span class="disabled">' + ICON.globe + ' Sem site</span>') +
@@ -757,6 +820,7 @@
     drawerBody.innerHTML = html;
     var favBtn = document.getElementById("drawer-fav");
     if (favBtn) favBtn.addEventListener("click", function () { toggleFav(r.id); renderDrawer(); render(); });
+    loadMiniMap(r);
   }
 
   document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeDrawer(); });
